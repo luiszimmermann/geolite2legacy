@@ -24,6 +24,7 @@
 
 from __future__ import print_function
 
+import os
 import re
 import sys
 import csv
@@ -48,8 +49,11 @@ cc_idx['uk'] = cc_idx['gb']     # uk / great britain
 cc_idx['sx'] = cc_idx['fx']     # st. martin?
 cc_idx['xk'] = cc_idx['rs']     # kosovo -> serbia
 
+continent_codes = {'AS': 'AP'}
+
 geoname2fips = {}
 output_encoding = 'utf-8'
+datfilecomment = ''
 
 
 def serialize_text(text):
@@ -139,6 +143,9 @@ class RadixTree(object):
         if locationsfile:
             for row in csv.DictReader(locationsfile):
                 geoname_id = row['geoname_id']
+                # remap continent codes according to https://dev.maxmind.com/geoip/legacy/codes/iso3166/
+                continent_code = row['continent_code']
+                row['continent_code'] = continent_codes.get(continent_code, continent_code)
                 locations[geoname_id] = row
 
         for nets, data in self.gen_nets(locations, outfile):
@@ -193,7 +200,7 @@ class RadixTree(object):
         f.write(struct.pack('B', 42))  # So long, and thanks for all the fish!
         f.write(b''.join(self.data_segments))
 
-        f.write(b'geolite2legacy.py')  # .dat file comment - can be anything
+        f.write(datfilecomment.encode('ascii'))  # .dat file comment - can be anything
         f.write(struct.pack('B', 0xff) * 3)
         f.write(struct.pack('B', self.edition))
         f.write(self.encode_rec(len(self.segments), self.segreclen))
@@ -281,7 +288,7 @@ class CityRev1RadixTree(RadixTree):
 
 class CityRev1v6RadixTree(CityRev1RadixTree):
     seek_depth = 127
-    edition = CITY_EDITION_REV1
+    edition = CITY_EDITION_REV1_V6
     reclen = STANDARD_RECORD_LENGTH
     segreclen = SEGMENT_RECORD_LENGTH
 
@@ -351,6 +358,11 @@ RTree = {
     'ASN': {'IPv4': ASNRadixTree, 'IPv6': ASNv6RadixTree}
 }
 
+Filenames = {
+    'Country': {'IPv4': "GeoIP.dat", 'IPv6': "GeoIPv6.dat"},
+    'City': {'IPv4': "GeoIPCity.dat", 'IPv6': "GeoIPCityv6.dat"},
+    'ASN': {'IPv4': "GeoIPASNum.dat", 'IPv6': "GeoIPASNumv6.dat"}
+}
 
 def parse_fips(fipsfile):
     with open(fipsfile) as f:
@@ -360,9 +372,11 @@ def parse_fips(fipsfile):
 
 
 def main():
+    global output_encoding, datfilecomment
+
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input-file', required=True, help='input zip file containings csv databases')
-    parser.add_argument('-o', '--output-file', required=True, help='output GeoIP dat file')
+    parser.add_argument('-o', '--output-file', help='output GeoIP dat file')
     parser.add_argument('-f', '--fips-file', help='geonameid to fips code mappings')
     parser.add_argument('-e', '--encoding', help='encoding to use for the output rather than utf-8')
     parser.add_argument('-d', '--debug', action='store_true', default=False, help='debug mode')
@@ -370,7 +384,6 @@ def main():
     opts = parser.parse_args()
 
     if opts.encoding:
-        global output_encoding
         try:
             codecs.lookup(opts.encoding)
         except LookupError as e:
@@ -395,6 +408,8 @@ def main():
         print('More than one kind of database found, please check the archive')
         sys.exit(1)
 
+    # noinspection PyUnboundLocalVariable
+    datfilecomment = '{} converted to legacy MaxMind DB with geolite2legacy'.format(os.path.dirname(entry.filename))
     dbtype, entries = entries.popitem()
 
     if dbtype == 'ASN':
@@ -423,16 +438,17 @@ def main():
         sys.exit(1)
 
     if dbtype != 'ASN':
-        if opts.fips_file:
-            parse_fips(opts.fips_file)
-        else:
-            print('You need to specify geoname2fips.csv file')
-            sys.exit(1)
+        fips_file = opts.fips_file or os.path.join(os.path.dirname(os.path.realpath(__file__)), 'geoname2fips.csv')
+        parse_fips(fips_file)
 
     tstart = time()
     print('Database type {} - Blocks {} - Encoding: {}'.format(dbtype, opts.ipv6, output_encoding))
 
     r.load(locs, TextIOWrapper(ziparchive.open(blocks, 'r'), encoding='utf-8'))
+
+    if not opts.output_file:
+        opts.output_file = Filenames[dbtype][opts.ipv6]
+        print('Output file {}'.format(opts.output_file))
 
     with open(opts.output_file, 'wb') as output:
         r.serialize(output)
